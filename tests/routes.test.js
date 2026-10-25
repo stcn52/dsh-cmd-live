@@ -111,3 +111,40 @@ test('the stream route sends an init snapshot first', async () => {
     registry.dispose()
   }
 })
+
+test('the kill route stops a running command', async () => {
+  const registry = createRegistry(resolveConfig({}))
+  const record = registry.create({ command: 'sleep 99' })
+  let killed = false
+  registry.observe(record, {
+    observed: {},
+    done: new Promise(() => {}),
+    result: () => new Promise(() => {}),
+    kill: () => { killed = true; return true },
+  })
+  const { server, base } = await serve(mount(registry))
+  try {
+    const response = await fetch(`${base}/cmd-live/kill`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: record.id }),
+    })
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.killed, true)
+    assert.equal(killed, true)
+
+    const missing = await fetch(`${base}/cmd-live/kill`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'nope' }),
+    })
+    assert.equal(missing.status, 404)
+
+    const wrongMethod = await fetch(`${base}/cmd-live/kill`)
+    assert.equal(wrongMethod.status, 405)
+  } finally {
+    server.close()
+    registry.dispose()
+  }
+})

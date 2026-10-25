@@ -1,8 +1,8 @@
 # dsh-cmd-live
 
-DSH 的命令监视器：宿主每跑一条 shell 命令，右侧边栏「命令」面板就会立刻出现一行，并**实时**跟着它的 stdout/stderr、耗时和退出状态——不用去对话里逐条翻工具调用。
+DSH 的命令监视器：宿主每跑一条 shell 命令，右侧边栏「命令」面板就会立刻出现一行；像 VS Code 的进程列表那样，选中一条就能看它**实时**的 stdout/stderr，能停止、能复制、能搜索，列表和输出之间的分栏可以拖。
 
-它不做任何执行，只观察。面板里没有输入框，HTTP 接口全是只读的 GET，所以它不会变成第二条能跑命令的通道。
+它只会**停止**已经出现的命令，不会执行任何新命令：唯一的写接口是 `POST /cmd-live/kill`。
 
 ![命令面板](docs/screenshot.png)
 
@@ -27,12 +27,16 @@ dsh plugin --profile web add github:stcn52/dsh-cmd-live
 
 ## 面板里有什么
 
-- **运行中 / 共 N 条**：标题栏实时计数；
-- **筛选**：全部 / 运行中 / 失败；
-- **自动展开**：新命令一开始就把输出展开（可关，偏好存在 localStorage）；
-- 每条命令：命令文本、工作目录、限时、已耗时（运行中每 0.5s 跳一次）、退出码 / 超时 / 取消、输出行数；
-- 点一行展开输出尾部，stderr 用红色区分，用户往上滚后不再强制拉回底部；
-- 「在新标签页打开完整输出」直接看 `/cmd-live/text?id=…` 纯文本。
+上半部分是命令列表（类似 VS Code 的进程列表），下半部分是选中命令的输出：
+
+- **筛选**：全部 / 运行中 / 失败；输入框按命令或目录搜索；
+- **选择**：点一行或按 ↑↓ / Home / End 切换；新命令开始时自动选中最新一条（可关）；一旦手动选了别的，就不抢焦点，「最新」按钮可以回到自动跟随；
+- **停止**：详情栏的「停止」或行尾悬停的 ■，向进程组发 SIGTERM（会二次确认）；
+- **复制输出**：复制当前保留的输出（HTTP + 局域网下自动退回 `execCommand`）；
+- **跟随**：新输出到达自动滚到底；往上滚自动暂停，右下角「↓ 回到最新」恢复；
+- **分栏**：拖动列表与输出之间的分隔条调整比例，双击？不需要，比例会记住；
+- **全文**：新标签页打开 `/cmd-live/text?id=…` 纯文本；
+- 详情显示工作目录、限时、已耗时（运行中每 0.5s 跳一次）、退出码 / 超时 / 被停止、行数、截断标记。
 
 ## 配置
 
@@ -55,6 +59,7 @@ dsh plugin --profile web add github:stcn52/dsh-cmd-live
 | GET | `/cmd-live/output?id=&since=` | 某条命令从 `since` 序号开始的输出行 |
 | GET | `/cmd-live/text?id=` | 某条命令的纯文本输出（stderr 行带 `[stderr]` 前缀） |
 | GET | `/cmd-live/stream` | SSE：先 `event: init` 快照，再推 `start` / `output` / `end` |
+| POST | `/cmd-live/kill` | 停止一条运行中的命令，body `{"id":"cmd_…"}` |
 
 SSE 事件格式：
 
@@ -71,7 +76,7 @@ data: {"id":"cmd_1_ab12","lines":[{"seq":0,"kind":"out","text":"hello"}]}
 ## 实现方式
 
 - 插件用 `ctx.inject(['shell'], …)` 拿到执行器，在**原始实例**（`Symbol.for('cordis.original')`，绕过 cordis 的 traceable 代理）上包一层 `execute`；
-- 原样调用原方法，把返回的执行句柄交给注册表；
+- 原样调用原方法，把返回的执行句柄交给注册表（句柄同时留着 `kill()` 供面板停止）；
 - 注册表按 `pollIntervalMs` 轮询 `execution.observed.stdout/stderr` 的偏移读取器（非消费式，不会抢走工具自己的输出游标）；
 - 进程关闭时 `result()` 给出 `timedOut` / `aborted` 分类，据此标记状态；
 - 卸载插件时恢复原方法并清空记录。

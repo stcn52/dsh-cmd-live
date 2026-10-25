@@ -81,6 +81,7 @@ export function createRegistry(settings, deps = {}) {
       signal: record.signal,
       timedOut: record.timedOut,
       aborted: record.aborted,
+      killed: record.killedByUser,
       error: record.error,
       lineCount: record.totalLines,
       truncated: record.truncated,
@@ -117,6 +118,7 @@ export function createRegistry(settings, deps = {}) {
       bytes: 0,
       truncated: false,
       resetPending: false,
+      killedByUser: false,
       offsets: { stdout: 0, stderr: 0 },
       carry: { out: '', err: '' },
       execution: null,
@@ -362,6 +364,33 @@ export function createRegistry(settings, deps = {}) {
   }
 
   /**
+   * Ask the shell executor to stop a running command.
+   *
+   * The handle's `kill()` is the seam's only termination verb. A handle that
+   * already settled reports false and the record stays as it is; the panel shows
+   * the eventual settle normally.
+   * @param id - command id.
+   * @returns `{ killed, command }`; `command` is null for an unknown id.
+   */
+  function kill(id) {
+    const record = records.get(id)
+    if (record === undefined) return { killed: false, command: null }
+    if (record.status !== 'running') return { killed: false, command: meta(record) }
+    record.killedByUser = true
+    let killed = false
+    try {
+      killed = record.execution?.kill?.() === true
+    } catch {
+      killed = false
+    }
+    if (!killed) {
+      record.killedByUser = false
+      return { killed: false, command: meta(record) }
+    }
+    return { killed: true, command: meta(record) }
+  }
+
+  /**
    * Settle a record: final drain, classify, publish.
    * @param record - internal record.
    * @param outcome - result facts (or `{ error }`).
@@ -392,13 +421,15 @@ export function createRegistry(settings, deps = {}) {
     } else if (extra.length > 0) {
       broadcast('output', { id: record.id, lines: extra })
     }
-    record.status = record.timedOut
-      ? 'timeout'
-      : record.aborted
-        ? 'canceled'
-        : record.error !== null || record.exitCode !== 0
-          ? 'failed'
-          : 'done'
+    record.status = record.killedByUser
+      ? 'canceled'
+      : record.timedOut
+        ? 'timeout'
+        : record.aborted
+          ? 'canceled'
+          : record.error !== null || record.exitCode !== 0
+            ? 'failed'
+            : 'done'
     broadcast('end', meta(record))
   }
 
@@ -476,6 +507,7 @@ export function createRegistry(settings, deps = {}) {
     create,
     observe,
     fail,
+    kill,
     poll,
     list,
     get,

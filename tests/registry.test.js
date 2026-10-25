@@ -193,3 +193,35 @@ test('text() marks stderr lines', () => {
   assert.equal(registry.text(record.id), 'ok\n[stderr] bad\n')
   registry.dispose()
 })
+
+test('kill asks the execution handle and marks the command canceled', async () => {
+  const registry = createRegistry(resolveConfig({ pollIntervalMs: 60000 }))
+  const record = registry.create({ command: 'sleep 99' })
+  const execution = fakeExecution()
+  let killed = 0
+  execution.kill = () => { killed += 1; return true }
+  registry.observe(record, execution)
+
+  const result = registry.kill(record.id)
+  assert.equal(result.killed, true)
+  assert.equal(result.command.status, 'running')
+  assert.equal(killed, 1)
+
+  execution.finish(null)
+  await settle()
+  assert.equal(registry.get(record.id).status, 'canceled')
+  assert.equal(registry.get(record.id).killed, true)
+  assert.equal(registry.kill(record.id).killed, false)
+  registry.dispose()
+})
+
+test('kill of an already finished command is a no-op', () => {
+  const registry = createRegistry(resolveConfig({}))
+  const record = registry.create({ command: 'true' })
+  registry.finish(record, { exitCode: 0 })
+  const result = registry.kill(record.id)
+  assert.equal(result.killed, false)
+  assert.equal(result.command.status, 'done')
+  assert.equal(registry.kill('missing').command, null)
+  registry.dispose()
+})

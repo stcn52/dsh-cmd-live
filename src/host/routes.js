@@ -8,14 +8,29 @@
  *   GET /cmd-live/output?id&since    one command's retained lines from a seq
  *   GET /cmd-live/text?id            one command's retained output as text
  *   GET /cmd-live/stream             SSE: init snapshot, then start/output/end
+ *   POST /cmd-live/kill              stop one running command
  *
- * The surface is read-only on purpose: a panel that shows every command the
- * agent runs must not become a second way to run one.
+ * The only mutating call is `kill`: the panel can stop a command it already
+ * shows, but it can never start one. The surface stays a monitor, not a shell.
  * @module dsh-cmd-live/host/routes
  */
 
+import { readFileSync } from 'node:fs'
+
 /** Route prefix claimed by this plugin. */
 export const ROUTE_PREFIX = '/cmd-live'
+
+/** This package's version, echoed by `/commands` so a stale host is visible. */
+const PLUGIN_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version ?? null
+  } catch {
+    return null
+  }
+})()
+
+/** Upper bound for a JSON request body; the panel sends a short id. */
+const MAX_BODY_BYTES = 8 * 1024
 
 /** Heartbeat interval: proxies drop an idle SSE connection otherwise. */
 const PING_INTERVAL_MS = 15000
@@ -95,6 +110,29 @@ function streamRegistry(req, res, registry) {
 }
 
 /**
+ * Read a small JSON object body.
+ * @param req - server request.
+ * @returns the parsed object ({} when empty).
+ */
+async function readJson(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > MAX_BODY_BYTES) throw new Error('request body is too large')
+    chunks.push(chunk)
+  }
+  if (size === 0) return {}
+  const text = Buffer.concat(chunks).toString('utf8').trim()
+  if (text === '') return {}
+  const parsed = JSON.parse(text)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('request body must be a JSON object')
+  }
+  return parsed
+}
+
+/**
  * Mount the HTTP surface.
  *
  * Services are reached through cordis injection, not a name lookup: `ctx.get()`
@@ -113,16 +151,14 @@ export function registerRoutes(ctx, registry) {
       kind: 'prefix',
       path: ROUTE_PREFIX,
       handler: (req, res) => {
-        try {
-          handle(req, res, registry)
-        } catch (error) {
+        handle(req, res, registry).catch(error => {
           if (res.writableEnded) return
           try {
             sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
           } catch {
             res.end()
           }
-        }
+        })
       },
     }))
   })
@@ -135,10 +171,36 @@ export function registerRoutes(ctx, registry) {
  * @param res - server response.
  * @param registry - command registry.
  */
-function handle(req, res, registry) {
+async function handle(req, res, registry) {
   const url = new URL(req.url ?? '/', 'http://localhost')
   const path = url.pathname
   const method = req.method ?? 'GET'
+
+  if (path === `${ROUTE_PREFIX}/kill`) {
+    if (method !== 'POST') {
+      sendJson(res, 405, { error: 'POST required' })
+      return
+    }
+    let body
+    try {
+      body = await readJson(req)
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (id === '') {
+      sendJson(res, 400, { error: 'id is required' })
+      return
+    }
+    const result = registry.kill(id)
+    if (result.command === null) {
+      sendJson(res, 404, { error: `command "${id}" is not known` })
+      return
+    }
+    sendJson(res, result.killed ? 200 : 409, result)
+    return
+  }
 
   if (method !== 'GET') {
     sendJson(res, 405, { error: 'GET required' })
@@ -146,7 +208,7 @@ function handle(req, res, registry) {
   }
 
   if (path === `${ROUTE_PREFIX}/commands`) {
-    sendJson(res, 200, { commands: registry.list(), serverTime: Date.now() })
+    sendJson(res, 200, { commands: registry.list(), serverTime: Date.now(), version: PLUGIN_VERSION })
     return
   }
 
