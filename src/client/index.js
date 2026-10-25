@@ -11,6 +11,8 @@ window.__ModuleLoader__.load({
     var KIND = 'cmd-live'
     var STYLE_ID = 'dsh-cmd-live-style'
     var ROUTE = '/cmd-live'
+    // Test seam: point the terminal half at a standalone PTY harness.
+    var TERM_BASE = (typeof window !== 'undefined' && window.__DCL_TERM_BASE__) || ROUTE
     var MAX_LINES = 600
     var MAX_COMMANDS = 120
 
@@ -81,6 +83,25 @@ window.__ModuleLoader__.load({
       '.dcl-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--border, #2a2f3a); font-size: 10.5px; color: var(--fg-muted, #98a2b3); }',
       '.dcl-foot b { color: var(--fg, #e6e9ef); font-weight: 600; }',
       '.dcl-toast { color: #7ee0a1; font-size: 10.5px; }',
+      '.dcl-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }',
+      '.dcl-tabs { display: flex; align-items: center; gap: 4px; padding: 6px 8px 5px; border-bottom: 1px solid var(--border, #2a2f3a); overflow-x: auto; overflow-y: hidden; flex: 0 0 auto; }',
+      '.dcl-tab { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--fg-muted, #98a2b3); font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap; }',
+      '.dcl-tab:hover { color: var(--fg, #e6e9ef); background: rgba(255, 255, 255, 0.04); }',
+      '.dcl-tab.is-on { color: var(--fg, #e6e9ef); background: var(--surface-2, #1b202a); border-color: var(--border, #2a2f3a); }',
+      '.dcl-tab-x { font-size: 11px; opacity: 0.55; border-radius: 3px; padding: 0 2px; }',
+      '.dcl-tab-x:hover { opacity: 1; color: #ff8a80; }',
+      '.dcl-tab-add { flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border: 1px solid var(--border, #2a2f3a); border-radius: 6px; background: transparent; color: var(--fg-muted, #98a2b3); font: inherit; font-size: 13px; line-height: 22px; cursor: pointer; }',
+      '.dcl-tab-add:hover { color: var(--fg, #e6e9ef); border-color: var(--border-strong, #3a4150); }',
+      '.dcl-panes { flex: 1 1 auto; min-height: 0; display: flex; }',
+      '.dcl-pane { flex: 1 1 auto; min-width: 0; min-height: 0; flex-direction: column; }',
+      '.dcl-term { flex: 1 1 auto; min-height: 0; padding: 5px 8px 3px; background: var(--surface-1, #0f1218); }',
+      '.dcl-term > div { height: 100%; }',
+      '.dcl-term .xterm { height: 100%; padding: 0; }',
+      '.dcl-term .xterm-viewport { background: transparent !important; }',
+      '.dcl-term-msg { padding: 18px 16px; color: var(--fg-muted, #98a2b3); font-size: 12px; line-height: 1.65; display: grid; gap: 10px; }',
+      '.dcl-term-msg code { font-family: var(--mono, ui-monospace, monospace); color: var(--fg, #e6e9ef); }',
+      '.dcl-term-exit { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-top: 1px solid var(--border, #2a2f3a); font-size: 11px; color: var(--fg-muted, #98a2b3); background: var(--surface-2, #1b202a); }',
+      '.dcl-term-exit b { color: #ff8a80; font-weight: 600; }',
     ].join('\n')
 
     /** Inject the tab stylesheet once. */
@@ -321,8 +342,8 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** The sidebar panel. */
-    function CmdLiveBody() {
+    /** The command monitor pane (one tab of the panel). */
+    function CommandsPane() {
       var commandsState = React.useState([])
       var commands = commandsState[0]
       var setCommands = commandsState[1]
@@ -848,6 +869,427 @@ window.__ModuleLoader__.load({
           h('span', null, '完成 ', h('b', null, String(doneCount))),
           h('span', null, '失败 ', h('b', null, String(failedCount))),
           h('span', { style: { marginLeft: 'auto' } }, '宿主内 ' + commands.length + ' 条'),
+        ),
+      )
+    }
+
+    /** Load one same-origin script once. */
+    function loadScriptOnce(src) {
+      return new Promise(function (resolve, reject) {
+        var existing = document.querySelector('script[data-dcl-src="' + src + '"]')
+        if (existing) {
+          if (existing.getAttribute('data-dcl-loaded') === 'true') resolve()
+          else {
+            existing.addEventListener('load', function () { resolve() })
+            existing.addEventListener('error', function () { reject(new Error('无法加载 ' + src)) })
+          }
+          return
+        }
+        var script = document.createElement('script')
+        script.src = src
+        script.async = true
+        script.setAttribute('data-dcl-src', src)
+        script.addEventListener('load', function () {
+          script.setAttribute('data-dcl-loaded', 'true')
+          resolve()
+        })
+        script.addEventListener('error', function () { reject(new Error('无法加载 ' + src)) })
+        document.head.appendChild(script)
+      })
+    }
+
+    /** Inject the vendored xterm stylesheet once. */
+    function ensureXtermCss() {
+      if (document.getElementById('dsh-cmd-live-xterm-css')) return
+      var link = document.createElement('link')
+      link.id = 'dsh-cmd-live-xterm-css'
+      link.rel = 'stylesheet'
+      link.href = TERM_BASE + '/vendor/xterm.css'
+      document.head.appendChild(link)
+    }
+
+    /** Load xterm and the fit addon from this plugin's own vendor route. */
+    function loadXterm() {
+      if (window.Terminal && window.FitAddon) return Promise.resolve()
+      ensureXtermCss()
+      var chain = window.Terminal ? Promise.resolve() : loadScriptOnce(TERM_BASE + '/vendor/xterm.js')
+      return chain.then(function () {
+        if (window.FitAddon) return undefined
+        return loadScriptOnce(TERM_BASE + '/vendor/addon-fit.js')
+      })
+    }
+
+    /** Read a CSS custom property with a fallback. */
+    function cssVar(name, fallback) {
+      try {
+        var value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+        return value === '' ? fallback : value
+      } catch (error) {
+        return fallback
+      }
+    }
+
+    /** One real PTY rendered with xterm. */
+    function TerminalPane(props) {
+      var hostRef = React.useRef(null)
+      var termRef = React.useRef(null)
+      var fitRef = React.useRef(null)
+      var sourceRef = React.useRef(null)
+      var reconnectRef = React.useRef(null)
+      var inputTimerRef = React.useRef(null)
+      var resizeTimerRef = React.useRef(null)
+      var pendingRef = React.useRef('')
+      var seqRef = React.useRef(0)
+      var disposedRef = React.useRef(false)
+      var statusState = React.useState('正在连接…')
+      var status = statusState[0]
+      var setStatus = statusState[1]
+      var errorState = React.useState(null)
+      var error = errorState[0]
+      var setError = errorState[1]
+      var exitState = React.useState(null)
+      var exitInfo = exitState[0]
+      var setExitInfo = exitState[1]
+      var inputErrorRef = React.useRef(null)
+
+      React.useEffect(function () {
+        disposedRef.current = false
+        var term = null
+        var fit = null
+        var source = null
+        var observer = null
+        var reconnects = 0
+        var seenInit = false
+
+        function sendResize() {
+          if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+          resizeTimerRef.current = setTimeout(function () {
+            var current = termRef.current
+            if (!current || disposedRef.current) return
+            var cols = current.cols
+            var rows = current.rows
+            if (!cols || !rows) return
+            fetch(TERM_BASE + '/term/resize', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ id: props.sessionId, cols: cols, rows: rows }),
+            }).catch(function () {})
+          }, 120)
+        }
+
+        function flushInput() {
+          inputTimerRef.current = null
+          var data = pendingRef.current
+          pendingRef.current = ''
+          if (data === '') return
+          fetch(TERM_BASE + '/term/input', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: props.sessionId, data: data }),
+          }).then(function (response) {
+            if (response.status === 409 || response.status === 404) setStatus('已退出')
+          }).catch(function () {})
+        }
+
+        function queueInput(data) {
+          pendingRef.current += data
+          if (inputTimerRef.current) return
+          inputTimerRef.current = setTimeout(flushInput, 8)
+        }
+
+        function connect() {
+          if (disposedRef.current || term === null) return
+          seenInit = false
+          var url = TERM_BASE + '/term/stream?id=' + encodeURIComponent(props.sessionId) + '&since=' + seqRef.current
+          var es = new EventSource(url)
+          source = es
+          sourceRef.current = es
+          es.addEventListener('init', function (event) {
+            try {
+              var payload = JSON.parse(event.data)
+              seenInit = true
+              reconnects = 0
+              if (payload.reset === true) {
+                term.reset()
+                seqRef.current = 0
+              }
+              for (var index = 0; index < (payload.chunks || []).length; index++) {
+                var chunk = payload.chunks[index]
+                term.write(chunk.text)
+                if (chunk.seq >= seqRef.current) seqRef.current = chunk.seq + 1
+              }
+              var running = payload.terminal && payload.terminal.status === 'running'
+              setStatus(running ? '运行中' : '已退出')
+              if (!running) setExitInfo(payload.terminal)
+              try { fit.fit() } catch (fitError) {}
+              sendResize()
+              term.focus()
+            } catch (parseError) {
+              // A truncated init frame: reconnect below.
+            }
+          })
+          es.addEventListener('data', function (event) {
+            try {
+              var payload = JSON.parse(event.data)
+              term.write(payload.text)
+              if (typeof payload.seq === 'number' && payload.seq >= seqRef.current) seqRef.current = payload.seq + 1
+            } catch (parseError) {}
+          })
+          es.addEventListener('exit', function (event) {
+            try {
+              var payload = JSON.parse(event.data)
+              setExitInfo(payload)
+              setStatus('已退出')
+              var code = typeof payload.exitCode === 'number' ? ' · exit ' + payload.exitCode : ''
+              term.write('\r\n\u001b[90m[进程已退出' + code + ']\u001b[0m\r\n')
+            } catch (parseError) {}
+            es.close()
+            if (source === es) source = null
+          })
+          es.onerror = function () {
+            es.close()
+            if (source === es) source = null
+            if (disposedRef.current) return
+            reconnects += 1
+            if (!seenInit && reconnects >= 2) {
+              setError('终端连接失败；如果宿主刚升级，请重启 DSH。')
+              setStatus('不可用')
+              return
+            }
+            if (reconnects > 8) {
+              setStatus('连接中断')
+              return
+            }
+            reconnectRef.current = setTimeout(connect, 600)
+          }
+        }
+
+        loadXterm().then(function () {
+          if (disposedRef.current || !hostRef.current) return
+          term = new window.Terminal({
+            cursorBlink: true,
+            cursorStyle: 'bar',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+            fontSize: 12,
+            lineHeight: 1.25,
+            scrollback: 6000,
+            allowProposedApi: true,
+            theme: {
+              background: cssVar('--surface-1', '#0f1218'),
+              foreground: cssVar('--fg', '#e6e9ef'),
+              cursor: cssVar('--accent', '#6ea8fe'),
+              selectionBackground: 'rgba(110, 168, 254, 0.30)',
+            },
+          })
+          fit = new window.FitAddon.FitAddon()
+          term.loadAddon(fit)
+          term.open(hostRef.current)
+          // Read-only test seam: the browser console / e2e can inspect the
+          // rendered buffer without a global that outlives the tab.
+          hostRef.current.__dshTerminal = term
+          termRef.current = term
+          fitRef.current = fit
+          try { fit.fit() } catch (fitError) {}
+          sendResize()
+          term.onData(queueInput)
+          term.onResize(function () { sendResize() })
+          observer = new window.ResizeObserver(function () {
+            try { fit.fit() } catch (fitError) {}
+          })
+          observer.observe(hostRef.current)
+          connect()
+        }).catch(function (loadError) {
+          setError(loadError.message)
+          setStatus('不可用')
+        })
+
+        return function () {
+          disposedRef.current = true
+          if (sourceRef.current) sourceRef.current.close()
+          sourceRef.current = null
+          if (reconnectRef.current) clearTimeout(reconnectRef.current)
+          if (inputTimerRef.current) clearTimeout(inputTimerRef.current)
+          if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
+          if (observer) observer.disconnect()
+          if (term) {
+            try { term.dispose() } catch (disposeError) {}
+          }
+          termRef.current = null
+          fitRef.current = null
+        }
+      }, [props.sessionId])
+
+      // A hidden pane cannot measure its grid; refit and focus when it becomes active.
+      React.useEffect(function () {
+        if (props.active !== true) return undefined
+        var timer = setTimeout(function () {
+          try { if (fitRef.current) fitRef.current.fit() } catch (error) {}
+          if (termRef.current) termRef.current.focus()
+        }, 40)
+        return function () { clearTimeout(timer) }
+      }, [props.active])
+
+      if (error) {
+        return h('div', { className: 'dcl-term-msg' },
+          h('div', null, '终端不可用：', error),
+          h('div', null, '这个面板的 PTY 由宿主提供；如果是刚升级插件，重启 DSH 后生效。'),
+        )
+      }
+
+      return h('div', { className: 'dcl-term-wrap', style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } },
+        h('div', { className: 'dcl-term', onClick: function () { if (termRef.current) termRef.current.focus() } },
+          h('div', { ref: hostRef, style: { height: '100%', minHeight: 0 } }),
+        ),
+        exitInfo !== null
+          ? h('div', { className: 'dcl-term-exit' },
+            h('span', null, '进程已退出', typeof exitInfo.exitCode === 'number' ? h('b', null, ' · exit ' + exitInfo.exitCode) : null),
+            h('span', { className: 'dcl-grow' }),
+            h('button', { className: 'dcl-btn', onClick: props.onNew, title: '新开一个终端' }, '新建终端'),
+          )
+          : h('div', { className: 'dcl-term-exit' },
+            h('span', null, status),
+            h('span', { className: 'dcl-dot' }),
+            h('span', null, 'PTY · 可直接输入，Ctrl+C 中断'),
+            h('span', { className: 'dcl-grow' }),
+            h('button', { className: 'dcl-btn', onClick: function () { if (termRef.current) termRef.current.clear() }, title: '清屏（不影响进程）' }, '清屏'),
+          ),
+      )
+    }
+
+    /** The sidebar panel: command monitor + interactive terminals. */
+    function CmdLiveBody() {
+      var tabsState = React.useState([{ key: 'commands', kind: 'commands' }])
+      var tabs = tabsState[0]
+      var setTabs = tabsState[1]
+      var activeState = React.useState('commands')
+      var active = activeState[0]
+      var setActive = activeState[1]
+      var noteState = React.useState(null)
+      var note = noteState[0]
+      var setNote = noteState[1]
+      var busyState = React.useState(false)
+      var busy = busyState[0]
+      var setBusy = busyState[1]
+
+      /** Add a terminal tab for a host session. */
+      var addTab = React.useCallback(function (terminal, activate) {
+        var key = 'term:' + terminal.id
+        setTabs(function (previous) {
+          if (previous.some(function (tab) { return tab.key === key })) return previous
+          return previous.concat([{ key: key, kind: 'term', id: terminal.id, title: terminal.title }])
+        })
+        if (activate !== false) setActive(key)
+      }, [])
+
+      /** Allocate a fresh PTY and select it. */
+      var createTerminal = React.useCallback(function () {
+        if (busy) return
+        setBusy(true)
+        setNote(null)
+        requestJson(TERM_BASE + '/term/create', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ cols: 100, rows: 28 }),
+        }).then(function (body) {
+          addTab(body.terminal)
+        }).catch(function (createError) {
+          if (createError.status === 503 || createError.status === 404) {
+            setNote('终端需要重启 DSH 宿主后可用（当前宿主还是升级前的插件）。')
+          } else {
+            setNote('无法新建终端：' + createError.message)
+          }
+        }).then(function () { setBusy(false) })
+      }, [addTab, busy])
+
+      /** Stop one terminal and drop its tab. */
+      var closeTerminal = React.useCallback(function (id) {
+        fetch(TERM_BASE + '/term/close', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: id }),
+        }).catch(function () {})
+        var key = 'term:' + id
+        setTabs(function (previous) { return previous.filter(function (tab) { return tab.key !== key }) })
+        setActive(function (current) { return current === key ? 'commands' : current })
+      }, [])
+
+      // Restore host terminals after a page refresh; create the first one when
+      // the panel is opened for the first time in this host.
+      React.useEffect(function () {
+        requestJson(TERM_BASE + '/term/list').then(function (body) {
+          if (body.available !== true) {
+            setNote('终端需要重启 DSH 宿主后可用（当前宿主还是升级前的插件）。')
+            return
+          }
+          var list = body.terminals || []
+          if (list.length === 0) {
+            createTerminal()
+            return
+          }
+          setTabs(function (previous) {
+            var next = previous.slice()
+            for (var index = 0; index < list.length; index++) {
+              var key = 'term:' + list[index].id
+              if (!next.some(function (tab) { return tab.key === key })) {
+                next.push({ key: key, kind: 'term', id: list[index].id, title: list[index].title })
+              }
+            }
+            return next
+          })
+        }).catch(function (loadError) {
+          if (loadError.status === 404) {
+            setNote('命令面板的宿主端还是旧版本：终端与停止功能要重启 DSH 后生效。')
+          } else {
+            setNote('无法读取终端列表：' + loadError.message)
+          }
+        })
+      }, [])
+
+      var terms = tabs.filter(function (tab) { return tab.kind === 'term' })
+
+      return h('div', { className: 'dcl-shell' },
+        h('div', { className: 'dcl-tabs' },
+          h('button', {
+            className: 'dcl-tab' + (active === 'commands' ? ' is-on' : ''),
+            onClick: function () { setActive('commands') },
+          }, '命令'),
+          terms.map(function (tab) {
+            return h('div', {
+              key: tab.key,
+              className: 'dcl-tab' + (active === tab.key ? ' is-on' : ''),
+              role: 'button',
+              tabIndex: 0,
+              onClick: function () { setActive(tab.key) },
+              onKeyDown: function (event) {
+                if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setActive(tab.key) }
+              },
+            },
+            h('span', null, tab.title),
+            h('span', {
+              className: 'dcl-tab-x',
+              title: '关闭终端（结束进程）',
+              onClick: function (event) { event.stopPropagation(); closeTerminal(tab.id) },
+            }, '×'))
+          }),
+          h('button', {
+            className: 'dcl-tab-add',
+            disabled: busy,
+            title: '新建终端',
+            onClick: createTerminal,
+          }, '+'),
+        ),
+        note ? h('div', { className: 'dcl-warn', style: { margin: '6px 10px' } }, note) : null,
+        h('div', { className: 'dcl-panes' },
+          h('div', { className: 'dcl-pane', style: { display: active === 'commands' ? 'flex' : 'none' } },
+            h(CommandsPane)),
+          terms.map(function (tab) {
+            return h('div', { key: tab.key, className: 'dcl-pane', style: { display: active === tab.key ? 'flex' : 'none' } },
+              h(TerminalPane, {
+                sessionId: tab.id,
+                active: active === tab.key,
+                onNew: createTerminal,
+              }))
+          }),
         ),
       )
     }

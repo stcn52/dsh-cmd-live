@@ -10,6 +10,16 @@
  *   GET /cmd-live/stream             SSE: init snapshot, then start/output/end
  *   POST /cmd-live/kill              stop one running command
  *
+ * Terminal half (real PTY, see `core/terms.js`):
+ *
+ *   GET  /cmd-live/term/list         retained terminal sessions
+ *   POST /cmd-live/term/create       allocate one PTY
+ *   GET  /cmd-live/term/stream?id&since  SSE: replay buffer, then live output
+ *   POST /cmd-live/term/input        write terminal input
+ *   POST /cmd-live/term/resize       change the PTY grid
+ *   POST /cmd-live/term/close        terminate one PTY
+ *   GET  /cmd-live/vendor/*          the vendored xterm assets
+ *
  * The only mutating call is `kill`: the panel can stop a command it already
  * shows, but it can never start one. The surface stays a monitor, not a shell.
  * @module dsh-cmd-live/host/routes
@@ -30,7 +40,17 @@ const PLUGIN_VERSION = (() => {
 })()
 
 /** Upper bound for a JSON request body; the panel sends a short id. */
-const MAX_BODY_BYTES = 8 * 1024
+const MAX_BODY_BYTES = 128 * 1024
+
+/** Vendored browser assets; served from this package, never from a CDN. */
+const VENDOR = {
+  'xterm.js': { file: 'xterm.js', type: 'application/javascript; charset=utf-8' },
+  'xterm.css': { file: 'xterm.css', type: 'text/css; charset=utf-8' },
+  'addon-fit.js': { file: 'addon-fit.js', type: 'application/javascript; charset=utf-8' },
+}
+
+/** Cache of vendored file bodies read from the package directory. */
+const vendorCache = new Map()
 
 /** Heartbeat interval: proxies drop an idle SSE connection otherwise. */
 const PING_INTERVAL_MS = 15000
@@ -133,6 +153,106 @@ async function readJson(req) {
 }
 
 /**
+ * Serve one vendored xterm asset.
+ * @param res - server response.
+ * @param name - requested file name.
+ */
+function serveVendor(res, name) {
+  const entry = VENDOR[name]
+  if (entry === undefined) {
+    sendJson(res, 404, { error: `unknown vendor asset "${name}"` })
+    return
+  }
+  let body = vendorCache.get(entry.file)
+  if (body === undefined) {
+    try {
+      body = readFileSync(new URL(`../../vendor/${entry.file}`, import.meta.url))
+      vendorCache.set(entry.file, body)
+    } catch (error) {
+      sendJson(res, 500, { error: describe(error) })
+      return
+    }
+  }
+  res.writeHead(200, {
+    'content-type': entry.type,
+    'cache-control': 'public, max-age=3600',
+    'content-length': body.length,
+  })
+  res.end(body)
+}
+
+/**
+ * Stream a terminal: replay the buffer, then follow output until it exits or
+ * the browser disconnects.
+ * @param req - server request.
+ * @param res - server response.
+ * @param terms - terminal manager.
+ * @param url - parsed request URL.
+ */
+function streamTerminal(req, res, terms, url) {
+  const id = url.searchParams.get('id')
+  if (id === null || id === '') {
+    sendJson(res, 400, { error: 'id is required' })
+    return
+  }
+  if (terms === null || terms === undefined) {
+    sendJson(res, 503, { error: 'the terminal backend is not mounted' })
+    return
+  }
+  const sinceRaw = url.searchParams.get('since')
+  const since = sinceRaw === null ? 0 : Number(sinceRaw)
+  const subscription = terms.subscribe(id, since, (event, payload) => {
+    if (res.writableEnded) return
+    if (event === 'data') {
+      writeEvent(res, 'data', { seq: payload.seq, text: payload.text })
+      return
+    }
+    writeEvent(res, 'exit', payload)
+    res.end()
+    subscription.unsubscribe()
+  })
+  if (subscription === null) {
+    sendJson(res, 404, { error: `terminal "${id}" is not known` })
+    return
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  })
+  res.write('retry: 3000\n\n: connected\n\n')
+  writeEvent(res, 'init', {
+    terminal: subscription.terminal,
+    reset: subscription.reset,
+    nextSeq: subscription.nextSeq,
+    floorSeq: subscription.floorSeq,
+    chunks: subscription.chunks,
+  })
+  if (subscription.terminal.status !== 'running') {
+    res.end()
+    subscription.unsubscribe()
+    return
+  }
+  const ping = setInterval(() => {
+    if (!res.writableEnded) res.write(': ping\n\n')
+  }, PING_INTERVAL_MS)
+  ping.unref?.()
+  req.on('close', () => {
+    clearInterval(ping)
+    subscription.unsubscribe()
+  })
+}
+
+/**
+ * @param error - unknown value.
+ * @returns a readable message.
+ */
+function describe(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
  * Mount the HTTP surface.
  *
  * Services are reached through cordis injection, not a name lookup: `ctx.get()`
@@ -144,14 +264,14 @@ async function readJson(req) {
  * @param registry - command registry.
  * @returns true when the routes were handed to the injection scope.
  */
-export function registerRoutes(ctx, registry) {
+export function registerRoutes(ctx, registry, terms) {
   if (typeof ctx.inject !== 'function') return false
   ctx.inject(['webServer'], webCtx => {
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'prefix',
       path: ROUTE_PREFIX,
       handler: (req, res) => {
-        handle(req, res, registry).catch(error => {
+        handle(req, res, registry, terms).catch(error => {
           if (res.writableEnded) return
           try {
             sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
@@ -171,10 +291,102 @@ export function registerRoutes(ctx, registry) {
  * @param res - server response.
  * @param registry - command registry.
  */
-async function handle(req, res, registry) {
+async function handle(req, res, registry, terms) {
   const url = new URL(req.url ?? '/', 'http://localhost')
   const path = url.pathname
   const method = req.method ?? 'GET'
+
+  if (path.startsWith(`${ROUTE_PREFIX}/vendor/`)) {
+    if (method !== 'GET') {
+      sendJson(res, 405, { error: 'GET required' })
+      return
+    }
+    serveVendor(res, path.slice(`${ROUTE_PREFIX}/vendor/`.length))
+    return
+  }
+
+  if (path === `${ROUTE_PREFIX}/term/list`) {
+    if (method !== 'GET') {
+      sendJson(res, 405, { error: 'GET required' })
+      return
+    }
+    sendJson(res, 200, {
+      available: terms !== null && terms !== undefined && terms.available(),
+      terminals: terms === null || terms === undefined ? [] : terms.list(),
+    })
+    return
+  }
+
+  if (path === `${ROUTE_PREFIX}/term/create`) {
+    if (method !== 'POST') {
+      sendJson(res, 405, { error: 'POST required' })
+      return
+    }
+    if (terms === null || terms === undefined || !terms.available()) {
+      sendJson(res, 503, { error: 'this host has no PTY backend (restart DSH with the current plugin build)' })
+      return
+    }
+    let body
+    try {
+      body = await readJson(req)
+    } catch (error) {
+      sendJson(res, 400, { error: describe(error) })
+      return
+    }
+    try {
+      const terminal = await terms.create({ cols: body.cols, rows: body.rows, title: body.title })
+      sendJson(res, 201, { terminal })
+    } catch (error) {
+      sendJson(res, 500, { error: describe(error) })
+    }
+    return
+  }
+
+  if (path === `${ROUTE_PREFIX}/term/stream`) {
+    if (method !== 'GET') {
+      sendJson(res, 405, { error: 'GET required' })
+      return
+    }
+    streamTerminal(req, res, terms, url)
+    return
+  }
+
+  if (path === `${ROUTE_PREFIX}/term/input` || path === `${ROUTE_PREFIX}/term/resize` || path === `${ROUTE_PREFIX}/term/close`) {
+    if (method !== 'POST') {
+      sendJson(res, 405, { error: 'POST required' })
+      return
+    }
+    if (terms === null || terms === undefined) {
+      sendJson(res, 503, { error: 'the terminal backend is not mounted' })
+      return
+    }
+    let body
+    try {
+      body = await readJson(req)
+    } catch (error) {
+      sendJson(res, 400, { error: describe(error) })
+      return
+    }
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (id === '') {
+      sendJson(res, 400, { error: 'id is required' })
+      return
+    }
+    try {
+      if (path.endsWith('/input')) {
+        sendJson(res, 200, { terminal: terms.input(id, body.data) })
+      } else if (path.endsWith('/resize')) {
+        sendJson(res, 200, { terminal: await terms.resize(id, body.cols, body.rows) })
+      } else {
+        const closed = await terms.close(id)
+        sendJson(res, closed ? 200 : 404, closed ? { closed: true } : { error: `terminal "${id}" is not known` })
+      }
+    } catch (error) {
+      const status = typeof error?.status === 'number' ? error.status : 500
+      sendJson(res, status, { error: describe(error) })
+    }
+    return
+  }
 
   if (path === `${ROUTE_PREFIX}/kill`) {
     if (method !== 'POST') {

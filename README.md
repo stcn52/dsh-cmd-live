@@ -1,8 +1,11 @@
 # dsh-cmd-live
 
-DSH 的命令监视器：宿主每跑一条 shell 命令，右侧边栏「命令」面板就会立刻出现一行；像 VS Code 的进程列表那样，选中一条就能看它**实时**的 stdout/stderr，能停止、能复制、能搜索，列表和输出之间的分栏可以拖。
+DSH 的右侧边栏面板，两件事：
 
-它只会**停止**已经出现的命令，不会执行任何新命令：唯一的写接口是 `POST /cmd-live/kill`。
+1. **命令列表**（「命令」页签）：宿主每跑一条 shell 命令就出现一行，选中即可看它**实时**的 stdout/stderr，能停止、复制、搜索，列表与输出之间的分栏可拖；
+2. **真实终端**（「终端 N」页签）：一个真正的 PTY + xterm，能直接敲命令、Ctrl+C、全屏程序、颜色和补全；进程活在宿主里，刷新页面会重新接上。
+
+终端只用于人机交互，不会把输出塞进对话；命令列表里的停止按钮也不会启动任何新命令——唯一的写接口是 `POST /cmd-live/kill` 和终端自己的输入接口。
 
 ![命令面板](docs/screenshot.png)
 
@@ -25,7 +28,17 @@ dsh plugin --profile web add github:stcn52/dsh-cmd-live
 
 装完刷新页面，右侧边栏会多一个「命令」页签（也可以从右侧栏的引导页打开）。
 
-## 面板里有什么
+## 终端页签
+
+- 打开面板时自动恢复宿主里已有的终端；没有就新建一个（`$SHELL -l`，工作目录是宿主进程的 cwd）；
+- `+` 新建，页签上的 `×` 结束进程；
+- 键盘输入直通 PTY：`Ctrl+C`、`Ctrl+D`、方向键、Tab 补全都由 shell 自己处理；
+- 面板宽度变化时自动 `fit` 并同步 `TIOCSWINSZ`；xterm 字体用系统等宽字体；
+- 会话在宿主进程里，刷新页面、切页签都不杀进程；结束或卸载插件时才终止。
+
+xterm 5.5 的 UMD 构建直接放在本包的 `vendor/` 里（MIT，附 LICENSE），由 `/cmd-live/vendor/*` 同源提供，不依赖 CDN。
+
+## 命令页签
 
 上半部分是命令列表（类似 VS Code 的进程列表），下半部分是选中命令的输出：
 
@@ -49,6 +62,13 @@ dsh plugin --profile web add github:stcn52/dsh-cmd-live
     maxLines: 400        # 每条命令保留多少行输出
     maxBytes: 262144     # 每条命令保留多少字节输出
     pollIntervalMs: 350  # 宿主轮询执行句柄的间隔
+    terminal:
+      shell: null        # 绝对路径；null = $SHELL 或 /bin/bash
+      cwd: null          # 绝对路径；null = 宿主进程 cwd
+      cols: 100
+      rows: 28
+      maxChunks: 4000    # 回放缓冲的块数上限
+      maxBytes: 1048576  # 回放缓冲的字节上限
 ```
 
 ## HTTP 接口
@@ -60,6 +80,13 @@ dsh plugin --profile web add github:stcn52/dsh-cmd-live
 | GET | `/cmd-live/text?id=` | 某条命令的纯文本输出（stderr 行带 `[stderr]` 前缀） |
 | GET | `/cmd-live/stream` | SSE：先 `event: init` 快照，再推 `start` / `output` / `end` |
 | POST | `/cmd-live/kill` | 停止一条运行中的命令，body `{"id":"cmd_…"}` |
+| GET | `/cmd-live/term/list` | 宿主里的终端会话 |
+| POST | `/cmd-live/term/create` | 分配一个 PTY，body `{cols,rows}` |
+| GET | `/cmd-live/term/stream?id=&since=` | SSE：先 `event: init`（含回放），再推 `data` / `exit` |
+| POST | `/cmd-live/term/input` | 写入终端输入 `{id,data}` |
+| POST | `/cmd-live/term/resize` | 调整 PTY 网格 `{id,cols,rows}` |
+| POST | `/cmd-live/term/close` | 结束终端 `{id}` |
+| GET | `/cmd-live/vendor/xterm.js` 等 | 同源提供 vendored xterm 资源 |
 
 SSE 事件格式：
 
@@ -75,6 +102,7 @@ data: {"id":"cmd_1_ab12","lines":[{"seq":0,"kind":"out","text":"hello"}]}
 
 ## 实现方式
 
+- 终端走 `ctx.subprocess.spawnTerminal`（和内置终端同一个 PTY 背板），输出经 `StringDecoder` 解码后按块回放，浏览器用 vendored xterm 渲染；
 - 插件用 `ctx.inject(['shell'], …)` 拿到执行器，在**原始实例**（`Symbol.for('cordis.original')`，绕过 cordis 的 traceable 代理）上包一层 `execute`；
 - 原样调用原方法，把返回的执行句柄交给注册表（句柄同时留着 `kill()` 供面板停止）；
 - 注册表按 `pollIntervalMs` 轮询 `execution.observed.stdout/stderr` 的偏移读取器（非消费式，不会抢走工具自己的输出游标）；

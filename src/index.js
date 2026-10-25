@@ -11,6 +11,7 @@
 
 import { resolveConfig } from './core/config.js'
 import { createRegistry } from './core/registry.js'
+import { createTermManager } from './core/terms.js'
 import { attachShellMonitor } from './host/monitor.js'
 import { registerRoutes } from './host/routes.js'
 
@@ -40,9 +41,22 @@ export function apply(ctx, config) {
   }
 
   const registry = createRegistry(settings)
+  const terms = createTermManager(settings)
   ctx.effect(() => () => registry.dispose())
+  ctx.effect(() => () => terms.dispose())
 
   if (typeof ctx.inject === 'function') {
+    // The PTY provider is the same seam the built-in terminal uses; without it
+    // (headless or a composition without terminals) the command list still works.
+    ctx.inject(['subprocess'], subCtx => {
+      try {
+        terms.attach(subCtx.subprocess)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(`dsh-cmd-live: cannot attach the PTY provider: ${message}`)
+      }
+    })
+
     ctx.inject(['shell'], shellCtx => {
       try {
         const detach = attachShellMonitor(shellCtx, registry)
@@ -58,5 +72,5 @@ export function apply(ctx, config) {
     })
   }
 
-  registerRoutes(ctx, registry)
+  registerRoutes(ctx, registry, terms)
 }

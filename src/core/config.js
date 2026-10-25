@@ -14,6 +14,15 @@ export const DEFAULTS = {
   maxLines: 400,
   maxBytes: 262144,
   pollIntervalMs: 350,
+  // The interactive terminal tab: a real PTY owned by this host process.
+  terminal: {
+    shell: null,
+    cwd: null,
+    cols: 100,
+    rows: 28,
+    maxChunks: 4000,
+    maxBytes: 1048576,
+  },
 }
 
 /**
@@ -30,6 +39,26 @@ export function resolveConfig(raw) {
     maxLines: positiveInt(config.maxLines, DEFAULTS.maxLines, 20, 5000),
     maxBytes: positiveInt(config.maxBytes, DEFAULTS.maxBytes, 4096, 8 * 1024 * 1024),
     pollIntervalMs: positiveInt(config.pollIntervalMs, DEFAULTS.pollIntervalMs, 100, 5000),
+    terminal: {
+      // A path in this host's execution world; null means `$SHELL`, then /bin/bash.
+      shell: typeof config.terminal?.shell === 'string' && config.terminal.shell.trim() !== ''
+        ? config.terminal.shell.trim()
+        : null,
+      // null means the host process working directory.
+      cwd: typeof config.terminal?.cwd === 'string' && config.terminal.cwd.trim() !== ''
+        ? config.terminal.cwd.trim()
+        : null,
+      cols: positiveInt(config.terminal?.cols, DEFAULTS.terminal.cols, 20, 500),
+      rows: positiveInt(config.terminal?.rows, DEFAULTS.terminal.rows, 5, 200),
+      maxChunks: positiveInt(config.terminal?.maxChunks, DEFAULTS.terminal.maxChunks, 4, 20000),
+      maxBytes: positiveInt(config.terminal?.maxBytes, DEFAULTS.terminal.maxBytes, 65536, 16 * 1024 * 1024),
+    },
+  }
+  if (settings.terminal.shell !== null && !settings.terminal.shell.startsWith('/')) {
+    throw new Error(`dsh-cmd-live: config.terminal.shell "${settings.terminal.shell}" must be an absolute path`)
+  }
+  if (settings.terminal.cwd !== null && !settings.terminal.cwd.startsWith('/')) {
+    throw new Error(`dsh-cmd-live: config.terminal.cwd "${settings.terminal.cwd}" must be an absolute path`)
   }
   return Object.freeze(settings)
 }
