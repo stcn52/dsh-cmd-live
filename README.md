@@ -90,6 +90,12 @@ data: {"id":"cmd_1_ab12","lines":[{"seq":0,"kind":"out","text":"hello"}]}
 node --test tests/*.test.js
 ```
 
-改完要 `commit + push`，然后 `dsh plugin --profile web remove dsh-cmd-live && dsh plugin --profile web add github:stcn52/dsh-cmd-live` 才会切到新 commit（pnpm 按 commit 拉 tarball）。
+改完要 `commit + push`，然后 `dsh plugin --profile web remove dsh-cmd-live && dsh plugin --profile web add github:stcn52/dsh-cmd-live` 切到新 commit（pnpm 按 commit 拉 tarball）。
+
+运行中的宿主对已经加载过的插件有模块缓存（按启动时解析到的路径），所以：
+
+- **宿主侧改动**（`src/index.js`、`src/core/*`、`src/host/*`）重装不会生效，要重启宿主；
+- **客户端改动**（`src/client/index.js`）由 `client-hmr` 每 500ms 轮询文件元数据自动重发 bundle，刷新页面即可；
+- 如果重装换了新的 pnpm store 目录，HMR 仍盯着旧目录。把新文件覆盖到旧目录那份（或用 `dsh` 的重启流程）就会触发重发。
 
 MIT License.
