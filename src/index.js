@@ -9,6 +9,7 @@
  * @module dsh-cmd-live
  */
 
+import { writeFileSync } from 'node:fs'
 import { resolveConfig } from './core/config.js'
 import { createRegistry } from './core/registry.js'
 import { attachShellMonitor } from './host/monitor.js'
@@ -67,6 +68,20 @@ export function apply(ctx, config) {
     ctx.inject(['clientModules'], modulesCtx => {
       try {
         const modules = modulesCtx.clientModules
+        const info = { name }
+        try {
+          info.graph = typeof modules?.graph === 'function'
+            ? modules.graph().entries.filter(entry => String(entry.id).includes('cmd-live'))
+            : null
+          info.baseline = typeof modules?.artifactBaseline === 'function' ? modules.artifactBaseline(name) : null
+          info.rebuilt = typeof modules?.rebuilt === 'function' ? modules.rebuilt(name) : null
+          info.after = typeof modules?.graph === 'function'
+            ? modules.graph().entries.filter(entry => String(entry.id).includes('cmd-live'))
+            : null
+        } catch (inner) {
+          info.error = inner instanceof Error ? inner.message : String(inner)
+        }
+        try { writeFileSync('/tmp/cmd-live-debug.json', JSON.stringify(info, null, 2)) } catch {}
         if (typeof modules?.rebuilt === 'function') modules.rebuilt(name)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
