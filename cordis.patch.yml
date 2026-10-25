@@ -1,0 +1,24 @@
+# dsh-cmd-live bundle patch
+#
+# Installed through the official CLI:
+#
+#   dsh plugin --profile <name> add <package-or-git-url>
+#
+# The plugin manager appends `dsh-cmd-live` to `dsh.profile.bundles`; profile
+# boot merges THIS patch, which inserts exactly one plugin row. The row id is
+# also the settings namespace: override any value below with an id-targeted
+# config entry in the profile's own cordis.patch.yml.
+- insert:
+    - id: cmd-live
+      name: 'dsh-cmd-live'
+      config:
+        # How many finished commands stay queryable (newest kept). Running
+        # commands are never evicted to make room for this cap.
+        maxCommands: 60
+        # Per-command retained output ceiling, in lines and bytes. The oldest
+        # lines are dropped first; the panel then shows the retained tail.
+        maxLines: 400
+        maxBytes: 262144
+        # How often a running execution's captured stdout/stderr is polled.
+        # 250-500ms keeps the panel alive without flooding the browser.
+        pollIntervalMs: 350

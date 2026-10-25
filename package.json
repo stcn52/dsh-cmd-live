@@ -1,0 +1,53 @@
+{
+  "name": "dsh-cmd-live",
+  "version": "0.1.0",
+  "description": "Live command monitor for DeepSeek Harness: every shell command the host runs appears in a right-side panel with live status, elapsed time and streaming stdout/stderr.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "command",
+    "monitor",
+    "streaming"
+  ],
+  "engines": {
+    "node": ">=22.19.0",
+    "dsh": ">=0.2.1-rc.1 <0.3.0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stcn52/dsh-cmd-live.git"
+  },
+  "homepage": "https://github.com/stcn52/dsh-cmd-live#readme",
+  "bugs": {
+    "url": "https://github.com/stcn52/dsh-cmd-live/issues"
+  }
+}
