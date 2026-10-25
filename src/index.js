@@ -58,5 +58,22 @@ export function apply(ctx, config) {
     })
   }
 
+  // A plugin update replaces files on disk, but the client-module graph caches
+  // each bundle's revision and bytes from boot, so a plain page refresh would
+  // keep serving the old browser half. Re-publishing our own artifact (the same
+  // hook the client HMR watch uses) makes the new bytes reachable without a
+  // host restart. Absent in headless profiles and older hosts: stay silent.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['clientModules'], modulesCtx => {
+      try {
+        const modules = modulesCtx.clientModules
+        if (typeof modules?.rebuilt === 'function') modules.rebuilt(name)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(`dsh-cmd-live: cannot republish the client bundle: ${message}`)
+      }
+    })
+  }
+
   registerRoutes(ctx, registry)
 }
