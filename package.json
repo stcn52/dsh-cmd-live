@@ -1,6 +1,6 @@
 {
   "name": "dsh-cmd-live",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Live command monitor for DeepSeek Harness: every shell command the host runs appears in a right-side panel with live status, elapsed time and streaming stdout/stderr.",
   "type": "module",
   "main": "src/index.js",

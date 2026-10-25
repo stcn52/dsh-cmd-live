@@ -76,6 +76,7 @@ window.__ModuleLoader__.load({
       '.dcl-follow { position: absolute; right: 14px; bottom: 12px; font: inherit; font-size: 10.5px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--accent, #6ea8fe); background: var(--surface-2, #1b202a); color: var(--accent, #6ea8fe); cursor: pointer; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); }',
       '.dcl-empty { padding: 18px 14px; color: var(--fg-muted, #98a2b3); display: grid; gap: 8px; line-height: 1.65; font-size: 12px; }',
       '.dcl-empty code { font-family: var(--mono, ui-monospace, monospace); color: var(--fg, #e6e9ef); }',
+      '.dcl-warn { margin: 0 10px 8px; padding: 5px 9px; border: 1px solid #6b553a; background: #2a2418; color: #ffc46b; border-radius: 7px; font-size: 11px; line-height: 1.45; }',
       '.dcl-error { margin: 0 10px 8px; padding: 6px 9px; border: 1px solid #6d3a3a; background: #2a1c1e; color: #ff8a80; border-radius: 7px; font-size: 11.5px; }',
       '.dcl-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--border, #2a2f3a); font-size: 10.5px; color: var(--fg-muted, #98a2b3); }',
       '.dcl-foot b { color: var(--fg, #e6e9ef); font-weight: 600; }',
@@ -97,6 +98,7 @@ window.__ModuleLoader__.load({
         return response.json().then(function (body) {
           if (!response.ok) {
             var error = new Error(body && body.error ? body.error : 'HTTP ' + response.status)
+            error.status = response.status
             error.body = body
             throw error
           }
@@ -253,8 +255,8 @@ window.__ModuleLoader__.load({
       running
         ? h('button', {
           className: 'dcl-rowstop',
-          title: '停止这条命令',
-          disabled: props.busy,
+          title: props.stale ? '宿主需要重启才能停止命令' : '停止这条命令',
+          disabled: props.busy || props.stale,
           onClick: function (event) { event.stopPropagation(); props.onKill() },
         }, '■')
         : null,
@@ -287,9 +289,9 @@ window.__ModuleLoader__.load({
           running
             ? h('button', {
               className: 'dcl-btn danger',
-              disabled: props.busy,
+              disabled: props.busy || props.stale,
               onClick: props.onKill,
-              title: '向进程组发 SIGTERM',
+              title: props.stale ? '宿主需要重启才能停止命令' : '向进程组发 SIGTERM',
             }, props.busy ? '停止中…' : '停止')
             : null,
           h('button', { className: 'dcl-btn', onClick: props.onCopy, title: '复制当前保留的输出' }, props.copied ? '已复制' : '复制输出'),
@@ -342,15 +344,18 @@ window.__ModuleLoader__.load({
       var followState = React.useState(readPref('dsh-cmd-live:follow', true))
       var follow = followState[0]
       var setFollow = followState[1]
-      var splitState = React.useState(readPref('dsh-cmd-live:split', 0.42))
-      var split = splitState[0]
-      var setSplit = splitState[1]
+      var listHeightState = React.useState(null)
+      var listHeight = listHeightState[0]
+      var setListHeight = listHeightState[1]
       var connectedState = React.useState(false)
       var connected = connectedState[0]
       var setConnected = connectedState[1]
       var errorState = React.useState(null)
       var error = errorState[0]
       var setError = errorState[1]
+      var hostState = React.useState(undefined)
+      var hostVersion = hostState[0]
+      var setHostVersion = hostState[1]
       var busyState = React.useState(null)
       var busyId = busyState[0]
       var setBusyId = busyState[1]
@@ -370,6 +375,7 @@ window.__ModuleLoader__.load({
       var followRef = React.useRef(follow)
       var autoRef = React.useRef(autoSelect)
       var outRef = React.useRef(null)
+      var listRef = React.useRef(null)
       var copyTimerRef = React.useRef(null)
       var bodyRef = React.useRef(null)
       var commandsRef = React.useRef([])
@@ -464,6 +470,7 @@ window.__ModuleLoader__.load({
             var list = body.commands || []
             setCommands(list)
             setError(null)
+            setHostVersion(typeof body.version === 'string' ? body.version : null)
             if (selectedRef.current === null && list.length > 0) select(list[0].id)
           })
           .catch(function (loadError) { setError(loadError.message) })
@@ -564,6 +571,7 @@ window.__ModuleLoader__.load({
         requestJson(ROUTE + '/commands')
           .then(function (body) {
             setCommands(body.commands || [])
+            setHostVersion(typeof body.version === 'string' ? body.version : null)
             if (selectedRef.current !== null) loadOutput(selectedRef.current)
             else if ((body.commands || []).length > 0) select(body.commands[0].id)
           })
@@ -577,6 +585,10 @@ window.__ModuleLoader__.load({
           if (commands[index].id === id) command = commands[index]
         }
         if (!command || command.status !== 'running') return
+        if (hostVersion === null) {
+          setError('当前宿主还没有停止接口；重启 DSH 后这个按钮才会生效。')
+          return
+        }
         if (typeof window.confirm === 'function') {
           var ok = window.confirm('停止这条命令？\n\n' + oneLine(command.command).slice(0, 200))
           if (!ok) return
@@ -591,7 +603,7 @@ window.__ModuleLoader__.load({
           if (body && body.command) upsert(body.command)
         }).catch(function (killError) {
           if (killError && killError.body && killError.body.killed === false) return
-          var extra = /404|unknown route|not known/.test(killError.message)
+          var extra = killError.status === 404 || killError.status === 405
             ? '（宿主还是旧版本，重启 DSH 后可用）'
             : ''
           setError(killError.message + extra)
@@ -650,23 +662,20 @@ window.__ModuleLoader__.load({
       function startDrag(event) {
         event.preventDefault()
         var body = bodyRef.current
-        if (!body) return
+        var list = listRef.current
+        if (!body || !list) return
         var rect = body.getBoundingClientRect()
         var startY = event.clientY
-        var startSplit = split
+        var startHeight = list.offsetHeight
         setDragging(true)
         var move = function (moveEvent) {
-          var raw = startSplit + (moveEvent.clientY - startY) / rect.height
-          setSplit(Math.min(0.72, Math.max(0.16, raw)))
+          var next = startHeight + (moveEvent.clientY - startY)
+          setListHeight(Math.min(rect.height - 180, Math.max(64, next)))
         }
         var up = function () {
           setDragging(false)
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
-          setSplit(function (value) {
-            writePref('dsh-cmd-live:split', value)
-            return value
-          })
         }
         window.addEventListener('pointermove', move)
         window.addEventListener('pointerup', up)
@@ -749,13 +758,19 @@ window.__ModuleLoader__.load({
           h('button', { className: 'dcl-chip', onClick: function () { followNewest() }, title: '跳到最新一条运行中的命令' }, '最新'),
           h('button', { className: 'dcl-chip', onClick: refresh, title: '重新拉取快照' }, '刷新'),
         ),
+        hostVersion === null
+          ? h('div', { className: 'dcl-warn' }, '当前宿主启动时加载的还是旧版插件：停止功能与分栏细节要重启 DSH 后才生效。')
+          : null,
         error ? h('div', { className: 'dcl-error' }, error) : null,
         h('div', { className: 'dcl-body', ref: bodyRef },
           h('div', {
             className: 'dcl-list',
+            ref: listRef,
             role: 'listbox',
             'aria-label': '命令列表',
-            style: { flex: '0 0 ' + (split * 100) + '%' },
+            style: listHeight === null
+              ? { flex: '0 0 auto', maxHeight: '46%' }
+              : { flex: '0 0 ' + listHeight + 'px', height: listHeight + 'px' },
             tabIndex: 0,
             onKeyDown: function (event) {
               if (event.key === 'ArrowDown') { event.preventDefault(); moveSelection(1) }
@@ -781,6 +796,7 @@ window.__ModuleLoader__.load({
                 now: now,
                 selected: command.id === selectedId,
                 busy: busyId === command.id,
+                stale: hostVersion === null,
                 onSelect: function () { select(command.id, { fromUser: true }) },
                 onKill: function () { stopCommand(command.id) },
               })
@@ -790,17 +806,20 @@ window.__ModuleLoader__.load({
             className: 'dcl-split',
             role: 'separator',
             'aria-orientation': 'horizontal',
-            'aria-valuenow': Math.round(split * 100),
+            'aria-valuenow': listHeight === null ? undefined : Math.round(listHeight),
             tabIndex: 0,
             'data-dragging': dragging ? 'true' : 'false',
             onPointerDown: startDrag,
             onKeyDown: function (event) {
-              if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-                event.preventDefault()
-                var next = Math.min(0.72, Math.max(0.16, split + (event.key === 'ArrowDown' ? 0.04 : -0.04)))
-                setSplit(next)
-                writePref('dsh-cmd-live:split', next)
-              }
+              if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+              event.preventDefault()
+              var list = listRef.current
+              var body = bodyRef.current
+              if (!list || !body) return
+              var ceiling = body.getBoundingClientRect().height - 180
+              var step = event.key === 'ArrowDown' ? 24 : -24
+              var next = Math.min(ceiling, Math.max(64, list.offsetHeight + step))
+              setListHeight(next)
             },
           }),
           selected !== null
@@ -809,6 +828,7 @@ window.__ModuleLoader__.load({
               output: outputs[selectedId],
               now: now,
               follow: follow,
+              stale: hostVersion === null,
               busy: busyId === selectedId,
               copied: copied,
               outRef: outRef,
