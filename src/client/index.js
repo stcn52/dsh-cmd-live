@@ -1069,7 +1069,7 @@ window.__ModuleLoader__.load({
           term = new window.Terminal({
             cursorBlink: true,
             cursorStyle: 'bar',
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+            fontFamily: '"DejaVu Sans Mono for Powerline", "Fira Mono for Powerline", "Hack", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
             fontSize: 12,
             lineHeight: 1.25,
             scrollback: 6000,
