@@ -345,11 +345,27 @@ window.__ModuleLoader__.load({
         else expand(id)
       }, [collapse, expand])
 
+      /** Auto-expand the newest running commands of a fresh snapshot. */
+      var seedRunning = React.useCallback(function (list) {
+        if (autoRef.current !== true) return
+        var picks = []
+        for (var index = 0; index < list.length && picks.length < 3; index++) {
+          if (list[index].status === 'running') picks.push(list[index].id)
+        }
+        if (picks.length === 0) return
+        var next = Object.assign({}, expandedRef.current)
+        for (var pick = 0; pick < picks.length; pick++) next[picks[pick]] = true
+        expandedRef.current = next
+        setExpanded(next)
+        for (var load = 0; load < picks.length; load++) loadOutput(picks[load])
+      }, [loadOutput])
+
       // Initial snapshot + live events. One EventSource for the tab's lifetime.
       React.useEffect(function () {
         requestJson(ROUTE + '/commands')
           .then(function (body) {
             setCommands(body.commands || [])
+            seedRunning(body.commands || [])
             setError(null)
           })
           .catch(function (loadError) { setError(loadError.message) })
@@ -363,6 +379,9 @@ window.__ModuleLoader__.load({
           try {
             var payload = JSON.parse(event.data)
             setCommands(payload.commands || [])
+            seedRunning(payload.commands || [])
+            var openIds = Object.keys(expandedRef.current)
+            for (var open = 0; open < openIds.length; open++) loadOutput(openIds[open])
             setConnected(true)
           } catch (parseError) {
             // A truncated frame must not break the panel.
@@ -428,7 +447,7 @@ window.__ModuleLoader__.load({
           if (sourceRef.current === source) sourceRef.current = null
           source.close()
         }
-      }, [upsert, loadOutput])
+      }, [upsert, loadOutput, seedRunning])
 
       // Keep every expanded log pinned to the tail unless the user scrolled up.
       React.useEffect(function () {
