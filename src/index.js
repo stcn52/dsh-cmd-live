@@ -41,7 +41,10 @@ export function apply(ctx, config) {
   }
 
   const registry = createRegistry(settings)
-  const terms = createTermManager(settings)
+  const terms = createTermManager(settings, {
+    // Open the shell where the agent's last command ran; fall back to $HOME.
+    cwd: () => registry.lastWorkdir() ?? process.env.HOME ?? process.cwd(),
+  })
   ctx.effect(() => () => registry.dispose())
   ctx.effect(() => () => terms.dispose())
 

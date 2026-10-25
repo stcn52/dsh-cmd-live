@@ -460,6 +460,20 @@ export function createRegistry(settings, deps = {}) {
   }
 
   /**
+   * Working directory of the most recent command, when it recorded one.
+   * The terminal uses it as its default directory so it opens where the agent
+   * works rather than at the host's launch directory.
+   * @returns an absolute path, or null.
+   */
+  function lastWorkdir() {
+    for (let index = order.length - 1; index >= 0; index -= 1) {
+      const record = records.get(order[index])
+      if (record !== undefined && typeof record.workdir === 'string' && record.workdir !== '') return record.workdir
+    }
+    return null
+  }
+
+  /**
    * Retained output lines from a sequence number onward.
    * @param id - command id.
    * @param since - first sequence number to include.
@@ -511,6 +525,7 @@ export function createRegistry(settings, deps = {}) {
     poll,
     list,
     get,
+    lastWorkdir,
     outputSince,
     text,
     dispose,

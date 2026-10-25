@@ -29,7 +29,11 @@ const MAX_INPUT_CHARS = 64 * 1024
 export function createTermManager(settings, deps = {}) {
   const now = deps.now ?? (() => Date.now())
   const shell = deps.shell ?? settings.terminal.shell ?? process.env.SHELL ?? '/bin/bash'
-  const cwd = deps.cwd ?? settings.terminal.cwd ?? process.cwd()
+  // `cwd` may be a provider so a session opened later starts in the directory
+  // the agent is actually working in.
+  const cwdProvider = typeof deps.cwd === 'function'
+    ? deps.cwd
+    : () => deps.cwd ?? settings.terminal.cwd ?? process.env.HOME ?? process.cwd()
   const random = deps.random ?? Math.random
   /** @type {Map<string, object>} */
   const sessions = new Map()
@@ -83,6 +87,9 @@ export function createTermManager(settings, deps = {}) {
     if (subprocess === null) throw new Error('no subprocess provider is mounted in this composition')
     const cols = clampInt(options.cols, settings.terminal.cols, 20, 500)
     const rows = clampInt(options.rows, settings.terminal.rows, 5, 200)
+    const cwd = typeof options.cwd === 'string' && options.cwd.startsWith('/')
+      ? options.cwd
+      : (settings.terminal.cwd ?? (cwdProvider() || process.cwd()))
 
     const handle = await subprocess.spawnTerminal({
       argv: [shell, '-l'],
